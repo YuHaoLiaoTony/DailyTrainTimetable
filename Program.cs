@@ -67,8 +67,8 @@ for (var offset = 0; offset < days; offset++)
 
     if (successfulDates.Count > 0 && successfulDates[^1] == trainDateText && offset < days - 1)
     {
-        Console.WriteLine("Waiting 8 seconds before the next TDX request...");
-        await Task.Delay(TimeSpan.FromSeconds(8));
+        Console.WriteLine("Waiting 10 seconds before the next TDX request...");
+        await Task.Delay(TimeSpan.FromSeconds(10));
     }
 }
 
