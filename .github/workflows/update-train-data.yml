@@ -35,7 +35,7 @@ jobs:
         env:
           TDX_CLIENT_ID: ${{ secrets.TDX_CLIENT_ID }}
           TDX_CLIENT_SECRET: ${{ secrets.TDX_CLIENT_SECRET }}
-        run: dotnet run --configuration Release --project DailyTrainTimetable.csproj
+        run: dotnet run --configuration Release --project DailyTrainTimetable.csproj -- --days 31
 
       - name: Setup Pages
         uses: actions/configure-pages@v5
