@@ -64,6 +64,12 @@ for (var offset = 0; offset < days; offset++)
     {
         Console.Error.WriteLine($"Failed to generate data for {trainDateText}: {ex.Message}");
     }
+
+    // 避免 TDX Too Many Requests
+    if (offset < days - 1)
+    {
+        await Task.Delay(TimeSpan.FromSeconds(3));
+    }
 }
 
 var latest = new LatestData(
