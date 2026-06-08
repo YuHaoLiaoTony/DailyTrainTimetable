@@ -65,10 +65,10 @@ for (var offset = 0; offset < days; offset++)
         Console.Error.WriteLine($"Failed to generate data for {trainDateText}: {ex.Message}");
     }
 
-    // 避免 TDX Too Many Requests
-    if (offset < days - 1)
+    if (successfulDates.Count > 0 && successfulDates[^1] == trainDateText && offset < days - 1)
     {
-        await Task.Delay(TimeSpan.FromSeconds(3));
+        Console.WriteLine("Waiting 5 seconds before the next TDX request...");
+        await Task.Delay(TimeSpan.FromSeconds(5));
     }
 }
 
@@ -81,7 +81,13 @@ await WriteJsonAtomicallyAsync(Path.Combine(outputDir, "latest.json"), latest, o
 await WriteJsonAtomicallyAsync(Path.Combine(outputDir, "stations.json"), stationMap.Values.ToList(), options);
 
 Console.WriteLine($"Done. Successful dates: {successfulDates.Count}/{days}");
-return successfulDates.Count > 0 ? 0 : 2;
+if (successfulDates.Count < days)
+{
+    Console.Error.WriteLine($"Generated data is incomplete. Requested {days} days but only {successfulDates.Count} succeeded.");
+    return 1;
+}
+
+return 0;
 
 static int ParseDays(string[] args)
 {
@@ -155,9 +161,8 @@ static async Task<DailyTrainData> FetchDailyDataAsync(
     DateTimeOffset updatedAt,
     IDictionary<string, Station> stationMap)
 {
-    using var response = await httpClient.GetAsync($"{ApiBaseUrl}/{trainDate}");
+    using var response = await SendDailyTimetableRequestWithRetryAsync(httpClient, trainDate);
     var responseText = await response.Content.ReadAsStringAsync();
-    response.EnsureSuccessStatusCode();
 
     using var document = JsonDocument.Parse(responseText);
     var sourceItems = GetTimetableItems(document.RootElement).ToList();
@@ -189,6 +194,67 @@ static async Task<DailyTrainData> FetchDailyDataAsync(
         Source: "TDX",
         UpdatedAt: updatedAt,
         TrainTimetables: trainTimetables);
+}
+
+static async Task<HttpResponseMessage> SendDailyTimetableRequestWithRetryAsync(HttpClient httpClient, string trainDate)
+{
+    var retryDelays = new[]
+    {
+        TimeSpan.FromSeconds(30),
+        TimeSpan.FromSeconds(60),
+        TimeSpan.FromSeconds(120)
+    };
+
+    for (var attempt = 0; attempt <= retryDelays.Length; attempt++)
+    {
+        var response = await httpClient.GetAsync($"{ApiBaseUrl}/{trainDate}");
+        if (response.IsSuccessStatusCode)
+        {
+            return response;
+        }
+
+        Console.Error.WriteLine($"TDX request failed for {trainDate}: HTTP {(int)response.StatusCode} {response.StatusCode}");
+
+        if ((int)response.StatusCode != 429 || attempt >= retryDelays.Length)
+        {
+            var errorBody = await response.Content.ReadAsStringAsync();
+            response.Dispose();
+
+            if (!string.IsNullOrWhiteSpace(errorBody))
+            {
+                throw new HttpRequestException($"TDX API returned HTTP {(int)response.StatusCode} {response.StatusCode}. Response: {errorBody}");
+            }
+
+            throw new HttpRequestException($"TDX API returned HTTP {(int)response.StatusCode} {response.StatusCode}.");
+        }
+
+        var delay = GetRetryDelay(response, retryDelays[attempt]);
+        response.Dispose();
+
+        Console.Error.WriteLine($"TDX returned 429 Too Many Requests for {trainDate}. Retrying after {delay.TotalSeconds:0} seconds.");
+        await Task.Delay(delay);
+    }
+
+    throw new InvalidOperationException("Unexpected retry state.");
+}
+
+static TimeSpan GetRetryDelay(HttpResponseMessage response, TimeSpan fallbackDelay)
+{
+    if (response.Headers.RetryAfter?.Delta is { } delta && delta > TimeSpan.Zero)
+    {
+        return delta;
+    }
+
+    if (response.Headers.RetryAfter?.Date is { } retryAt)
+    {
+        var delay = retryAt - DateTimeOffset.UtcNow;
+        if (delay > TimeSpan.Zero)
+        {
+            return delay;
+        }
+    }
+
+    return fallbackDelay;
 }
 
 static IEnumerable<JsonElement> GetTimetableItems(JsonElement root)
