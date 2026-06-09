@@ -1,4 +1,4 @@
-﻿# Codex Instructions
+# Codex Instructions
 
 ## Token / context usage
 
@@ -14,6 +14,7 @@ Do not read or analyze these paths unless explicitly requested:
 
 - bin/
 - obj/
+- output/
 - .vs/
 - .git/
 - node_modules/
@@ -25,55 +26,76 @@ Do not read or analyze these paths unless explicitly requested:
 
 ## Project context
 
-This repository is a .NET 8 Console App named `PttStockTelegramNotifier`.
-It runs once and exits. GitHub Actions is responsible for scheduled execution.
+This repository is a .NET 8 Console App named `DailyTrainTimetable`.
+It fetches Taiwan Railway daily train timetable data from TDX, normalizes it into a small static JSON dataset, and publishes that dataset through GitHub Pages.
 
 The app:
 
-- Crawls PTT Stock board HTML with `HttpClient`.
-- Parses posts with HtmlAgilityPack.
-- Applies `Ptt.FilterRules` from `appsettings.json`.
-- Sends matched posts through Telegram Bot API.
-- Updates `notified-posts.json` only after a Telegram notification succeeds.
+- Uses the TDX TRA DailyTrainTimetable API:
+  `https://tdx.transportdata.tw/api/basic/v3/Rail/TRA/DailyTrainTimetable/TrainDate/{yyyy-MM-dd}`.
+- Authenticates with TDX through OAuth client credentials.
+- Reads credentials from environment variables:
+  - `TDX_CLIENT_ID`
+  - `TDX_CLIENT_SECRET`
+- Generates data starting from the current `Asia/Taipei` date.
+- Defaults to today plus the next 6 days, and supports `--days <number>`.
+- Writes JSON files under `output/data`.
+- Continues past a failed date, but exits non-zero if not all requested dates succeed.
 
 ## Project workflow
 
-- For small changes, identify the minimal files needed.
 - Keep changes focused and avoid unrelated refactors.
-- Do not rewrite the whole project unless explicitly requested.
-- Do not commit secrets, Telegram bot tokens, chat IDs, or local environment values.
-- Treat `notified-posts.json` as committed app state; edit it only when the task explicitly involves notification history.
-- If changing filter behavior, update `Services/PttPostFilter.cs`, `Models/FilterRule.cs`, `appsettings.json`, README, and filter tests as needed.
-- If changing GitHub Actions behavior, update `.github/workflows/ptt-stock-notifier.yml` and README cron/action notes as needed.
+- This is currently a small single-project app; prefer simple changes in `Program.cs` unless a larger structure is clearly justified.
+- Do not commit TDX credentials, local secrets, or environment-specific values.
+- Treat `output/` as generated deploy data. Do not manually edit generated JSON unless the task explicitly asks for generated sample data.
+- If changing the generated JSON schema, update `Program.cs`, README schema examples, app SQLite notes, and `DataVersion` as needed.
+- If changing date range behavior, update `ParseDays`, README local run notes, and GitHub Actions arguments as needed.
+- If changing TDX request behavior, keep retry/rate-limit handling in mind, especially HTTP 429 and `Retry-After`.
+- If changing GitHub Actions behavior, update `.github/workflows/update-train-data.yml` and README schedule/Pages notes together.
 
-## Filter rules
+## Generated files
 
-Filtering uses `Ptt.FilterRules` in `appsettings.json`.
+The app writes these files:
 
-- Run all `Action = Exclude` rules first.
-- If any Exclude rule matches, do not notify.
-- Then run `Action = Include` rules.
-- Notify only when at least one Include rule matches.
-- Empty rules must not match anything.
-- For `MatchMode = All`, each configured condition group must match.
-- For list fields such as `TitleTypes`, `Keywords`, and `Authors`, values inside the same field are treated as any-match within that condition group.
+```text
+output/data/{yyyyMMdd}.json
+output/data/latest.json
+output/data/stations.json
+```
 
-## Build and test commands
+`{yyyyMMdd}.json` contains one date of train timetable data.
+`latest.json` lists successful dates, generation time, and data version.
+`stations.json` contains station IDs and names discovered in successful timetable files.
+
+Use `System.Text.Json` and the existing camelCase, indented JSON settings when modifying output.
+
+## Build and run commands
 
 Use these commands from the repository root:
 
 ```powershell
 dotnet restore
 dotnet build --configuration Release --no-restore
-dotnet run --configuration Release --no-build -- --test-filter
 ```
 
-For a normal local run, Telegram secrets must be provided through environment variables:
+For a local run, provide TDX credentials through environment variables:
 
 ```powershell
-$env:TELEGRAM_BOT_TOKEN = "<bot token>"
-$env:TELEGRAM_CHAT_ID = "<chat id>"
-dotnet run --configuration Release
+$env:TDX_CLIENT_ID = "<client id>"
+$env:TDX_CLIENT_SECRET = "<client secret>"
+dotnet run
+```
+
+To generate a different number of days:
+
+```powershell
+dotnet run -- --days 14
+```
+
+The GitHub Actions workflow currently runs:
+
+```powershell
+dotnet run --configuration Release --project DailyTrainTimetable.csproj -- --days 31
 ```
 
 ## GitHub Actions
@@ -81,13 +103,24 @@ dotnet run --configuration Release
 The workflow file is:
 
 ```text
-.github/workflows/ptt-stock-notifier.yml
+.github/workflows/update-train-data.yml
 ```
 
-The workflow supports:
+The workflow:
 
-- `workflow_dispatch` for manual runs.
-- `schedule` for cron runs.
-- `contents: write` so `notified-posts.json` can be committed back after successful notifications.
+- Supports `workflow_dispatch` for manual runs.
+- Supports `schedule` for cron runs.
+- Uses `TDX_CLIENT_ID` and `TDX_CLIENT_SECRET` repository secrets.
+- Builds/runs the .NET app and uploads `output` as a GitHub Pages artifact.
+- Requires GitHub Pages source to be set to `GitHub Actions`.
 
-Scheduled workflows only run on the GitHub default branch and may be delayed or skipped by GitHub under load. If schedule stops firing, modifying the cron expression can help GitHub re-register the scheduled workflow.
+GitHub Actions cron expressions are UTC. Scheduled workflows only run on the GitHub default branch and may be delayed or skipped by GitHub under load. If a scheduled workflow stops firing, modifying the cron expression can help GitHub re-register the schedule.
+
+## Coding notes
+
+- Keep nullable annotations clean; the project uses `<Nullable>enable</Nullable>`.
+- Prefer records for simple output DTOs, matching the current style.
+- Keep Taiwan date calculations based on `Asia/Taipei` with the Windows fallback `Taipei Standard Time`.
+- Preserve atomic JSON writes through `WriteJsonAtomicallyAsync`.
+- Avoid adding third-party packages unless they solve a clear problem.
+- If adding tests later, prefer focused tests for parsing, date selection, retry behavior, and JSON shape.
