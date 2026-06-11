@@ -31,7 +31,11 @@ public sealed class TdxAuthService : ITdxAuthService
 
         using var response = await _httpClient.SendAsync(request, ct);
         var responseText = await response.Content.ReadAsStringAsync(ct);
-        response.EnsureSuccessStatusCode();
+        if (!response.IsSuccessStatusCode)
+        {
+            throw new HttpRequestException(
+                $"TDX token endpoint returned HTTP {(int)response.StatusCode} {response.StatusCode}. Response: {responseText}");
+        }
 
         using var document = JsonDocument.Parse(responseText);
         if (!document.RootElement.TryGetProperty("access_token", out var accessTokenElement))

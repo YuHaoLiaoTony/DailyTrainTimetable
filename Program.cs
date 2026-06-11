@@ -10,6 +10,19 @@ public static class Program
 
     public static async Task<int> Main(string[] args)
     {
+        try
+        {
+            return await RunAsync(args);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Unhandled exception: {ex}");
+            return 1;
+        }
+    }
+
+    private static async Task<int> RunAsync(string[] args)
+    {
         var days = ParseDays(args);
         var clientId = Environment.GetEnvironmentVariable("TDX_CLIENT_ID");
         var clientSecret = Environment.GetEnvironmentVariable("TDX_CLIENT_SECRET");
@@ -60,7 +73,7 @@ public static class Program
             }
             catch (Exception ex)
             {
-                Console.Error.WriteLine($"Failed to generate data for {date:yyyy-MM-dd}: {ex.Message}");
+                Console.Error.WriteLine($"Failed to generate data for {date:yyyy-MM-dd}: {ex}");
             }
 
             if (successfulDates.Count > 0 && successfulDates[^1] == date)
