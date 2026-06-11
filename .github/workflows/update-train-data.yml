@@ -31,10 +31,22 @@ jobs:
         with:
           dotnet-version: "8.0.x"
 
+      - name: Cache output data
+        uses: actions/cache@v4
+        with:
+          path: output/data
+          key: train-data-${{ github.run_id }}
+          restore-keys: |
+            train-data-
+
+      - name: Run tests
+        run: dotnet test --configuration Release --no-restore
+
       - name: Generate train timetable JSON
         env:
           TDX_CLIENT_ID: ${{ secrets.TDX_CLIENT_ID }}
           TDX_CLIENT_SECRET: ${{ secrets.TDX_CLIENT_SECRET }}
+          PAGES_BASE_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}
         run: dotnet run --configuration Release --project DailyTrainTimetable.csproj -- --days 31
 
       - name: Setup Pages
