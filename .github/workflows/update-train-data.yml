@@ -40,7 +40,7 @@ jobs:
             train-data-
 
       - name: Run tests
-        run: dotnet test --configuration Release --no-restore
+        run: dotnet test --configuration Release
 
       - name: Generate train timetable JSON
         env:
