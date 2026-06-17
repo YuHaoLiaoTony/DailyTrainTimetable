@@ -6,12 +6,12 @@ namespace DailyTrainTimetable.Services;
 public sealed class DataCacheService : IDataCacheService
 {
     private readonly HttpClient _httpClient;
-    private readonly Uri _pagesLatestUri;
+    private readonly Uri? _pagesLatestUri;
 
     public DataCacheService(HttpClient httpClient, Uri? pagesLatestUri = null)
     {
         _httpClient = httpClient;
-        _pagesLatestUri = pagesLatestUri ?? new Uri("https://example.com/data/latest.json");
+        _pagesLatestUri = pagesLatestUri;
     }
 
     public async Task<CacheResult> EvaluateAsync(
@@ -23,7 +23,15 @@ public sealed class DataCacheService : IDataCacheService
         var fetchDates = new HashSet<DateOnly>();
         var forceFetchDates = new HashSet<DateOnly>();
 
-        var pagesLatest = await TryFetchPagesLatestAsync(ct);
+        LatestData? pagesLatest = null;
+        if (_pagesLatestUri != null)
+        {
+            pagesLatest = await TryFetchPagesLatestAsync(ct);
+            if (pagesLatest == null)
+            {
+                Console.Error.WriteLine($"Warning: Could not fetch latest.json from {_pagesLatestUri}, falling back to file-only cache check.");
+            }
+        }
 
         foreach (var date in requestedDates)
         {
@@ -44,6 +52,7 @@ public sealed class DataCacheService : IDataCacheService
 
                 if (!pagesDateEntry)
                 {
+                    Console.WriteLine($"Date {dateStr} exists locally but not in Pages latest.json, re-fetching.");
                     fetchDates.Add(date);
                 }
                 else

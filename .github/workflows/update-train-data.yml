@@ -5,6 +5,17 @@ on:
     # 05:00 Asia/Taipei is 21:00 UTC on the previous day.
     - cron: "0 21 * * *"
   workflow_dispatch:
+    inputs:
+      days:
+        description: Number of days to generate
+        required: false
+        default: "1"
+        type: choice
+        options:
+          - "1"
+          - "7"
+          - "14"
+          - "31"
 
 permissions:
   contents: read
@@ -47,7 +58,7 @@ jobs:
           TDX_CLIENT_ID: ${{ secrets.TDX_CLIENT_ID }}
           TDX_CLIENT_SECRET: ${{ secrets.TDX_CLIENT_SECRET }}
           PAGES_BASE_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}
-        run: dotnet run --configuration Release --project DailyTrainTimetable.csproj -- --days 31
+        run: dotnet run --configuration Release --project DailyTrainTimetable.csproj -- --days ${{ inputs.days || '1' }}
 
       - name: Setup Pages
         uses: actions/configure-pages@v5

@@ -21,7 +21,12 @@ public static class Program
         }
     }
 
-    private static async Task<int> RunAsync(string[] args)
+    internal static async Task<int> RunAsync(
+        string[] args,
+        ITdxAuthService? authServiceOverride = null,
+        ITdxApiService? apiServiceOverride = null,
+        IDataCacheService? cacheServiceOverride = null,
+        IDataWriterService? writerServiceOverride = null)
     {
         var days = ParseDays(args);
         var clientId = Environment.GetEnvironmentVariable("TDX_CLIENT_ID");
@@ -38,16 +43,37 @@ public static class Program
         var outputDir = Path.Combine("output", "data");
         Directory.CreateDirectory(outputDir);
 
+        if (authServiceOverride != null)
+        {
+            return await RunCoreAsync(
+                days, now, outputDir,
+                authServiceOverride,
+                apiServiceOverride!,
+                cacheServiceOverride!,
+                writerServiceOverride!);
+        }
+
         using var httpClient = new HttpClient();
         httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("DailyTrainTimetable/1.0");
 
         var authService = new TdxAuthService(httpClient, clientId, clientSecret);
         var apiService = new TdxApiService(httpClient, authService);
-
         var pagesUri = GetPagesLatestUri();
         var cacheService = new DataCacheService(httpClient, pagesUri);
         var writerService = new DataWriterService();
 
+        return await RunCoreAsync(days, now, outputDir, authService, apiService, cacheService, writerService);
+    }
+
+    private static async Task<int> RunCoreAsync(
+        int days,
+        DateTimeOffset now,
+        string outputDir,
+        ITdxAuthService authService,
+        ITdxApiService apiService,
+        IDataCacheService cacheService,
+        IDataWriterService writerService)
+    {
         var stationMap = new SortedDictionary<string, Station>(StringComparer.Ordinal);
         var successfulDates = new List<DateOnly>();
         var startDate = DateOnly.FromDateTime(now.DateTime);
@@ -108,7 +134,7 @@ public static class Program
 
     internal static int ParseDays(string[] args)
     {
-        const int defaultDays = 7;
+        const int defaultDays = 1;
 
         for (var i = 0; i < args.Length; i++)
         {
