@@ -45,7 +45,7 @@ public sealed class DataCacheService : IDataCacheService
                 continue;
             }
 
-            if (pagesLatest != null)
+            if (pagesLatest?.AvailableDates != null)
             {
                 var dateStr = date.ToString("yyyy-MM-dd");
                 var pagesDateEntry = pagesLatest.AvailableDates.Contains(dateStr);
