@@ -52,6 +52,7 @@ The app:
 - If changing date range behavior, update `ParseDays`, README local run notes, and GitHub Actions arguments as needed.
 - If changing TDX request behavior, keep retry/rate-limit handling in mind, especially HTTP 429 and `Retry-After`.
 - If changing GitHub Actions behavior, update `.github/workflows/update-train-data.yml` and README schedule/Pages notes together.
+- Never remove the `Refresh keepalive commit` step or `.github/heartbeat.json`: GitHub auto-disables `schedule` workflows after 60 days without repository push activity (`disabled_inactivity`). The step pushes a refreshed `lastRefreshedAt` every `intervalDays` (55) days and is a no-op otherwise. Keep `intervalDays < 60`.
 
 ## Generated files
 

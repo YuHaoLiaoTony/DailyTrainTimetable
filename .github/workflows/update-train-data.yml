@@ -18,7 +18,7 @@ on:
           - "31"
 
 permissions:
-  contents: read
+  contents: write # 需要 write 才能推 keepalive commit
   pages: write
   id-token: write
 
@@ -36,6 +36,60 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # 若有設定 KEEPALIVE_TOKEN（fine-grained PAT, contents:write）就用它，
+          # 讓 keepalive commit 是「真人 push」而不只是 bot push。
+          token: ${{ secrets.KEEPALIVE_TOKEN || github.token }}
+
+      # GitHub 會在「repo 連續 60 天沒有 push」後自動停用 schedule 觸發。
+      # 這個步驟每 intervalDays（預設 55 天）更新一次 .github/heartbeat.json 並 push，
+      # 讓 60 天計時器永遠不會到期；其餘時間完全不產生 commit。
+      - name: Refresh keepalive commit
+        env:
+          HEARTBEAT_FILE: .github/heartbeat.json
+          DEFAULT_INTERVAL_DAYS: "55"
+        run: |
+          set -euo pipefail
+          file="$HEARTBEAT_FILE"
+          today="$(date -u +%F)"
+          interval="$DEFAULT_INTERVAL_DAYS"
+          last=""
+
+          if [ -f "$file" ]; then
+            last="$(sed -n 's/.*"lastRefreshedAt"[[:space:]]*:[[:space:]]*"\([0-9][0-9-]\{8\}\)".*/\1/p' "$file" | head -n 1)"
+            file_interval="$(sed -n 's/.*"intervalDays"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$file" | head -n 1)"
+            if [ -n "${file_interval:-}" ]; then
+              interval="$file_interval"
+            fi
+          fi
+
+          if [ -n "$last" ]; then
+            due="$(date -u -d "$last + $interval days" +%F)"
+            if [ "$(date -u -d "$today" +%s)" -lt "$(date -u -d "$due" +%s)" ]; then
+              echo "keepalive 尚有效：last=$last interval=${interval}d nextDue=$due（今日 $today），跳過。"
+              exit 0
+            fi
+          fi
+
+          next="$(date -u -d "$today + $interval days" +%F)"
+          mkdir -p "$(dirname "$file")"
+          printf '{\n  "intervalDays": %s,\n  "lastRefreshedAt": "%s",\n  "nextDueAt": "%s"\n}\n' \
+            "$interval" "$today" "$next" > "$file.tmp"
+          mv "$file.tmp" "$file"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$file"
+
+          if git diff --cached --quiet; then
+            echo "keepalive 內容無變更，跳過 commit。"
+            exit 0
+          fi
+
+          git commit -m "chore: refresh keepalive until $next"
+          git push origin "HEAD:${GITHUB_REF_NAME}" \
+            || { git pull --rebase --autostash && git push origin "HEAD:${GITHUB_REF_NAME}"; }
+          echo "keepalive 已更新：last=$today nextDue=$next"
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v4

@@ -150,11 +150,45 @@ output/data/
 ### 執行步驟
 
 1. 簽出程式碼
-2. 安裝 .NET 8 SDK
-3. 以 `--days 31` 參數執行應用程式（產生今天起 31 天的資料）
-4. 設定 GitHub Pages
-5. 上傳 `output/` 目錄為 Pages artifact
-6. 部署至 GitHub Pages
+2. 檢查並視需要更新 `.github/heartbeat.json`（見下方「防止排程被自動停用」）
+3. 安裝 .NET 8 SDK
+4. 以 `--days` 參數執行應用程式（預設 1 天）
+5. 設定 GitHub Pages
+6. 上傳 `output/` 目錄為 Pages artifact
+7. 部署至 GitHub Pages
+
+### 防止排程被自動停用（keepalive）
+
+GitHub 會在 **repository 連續 60 天沒有 push 活動**後，自動停用 `schedule` 觸發的 workflow（狀態會變成 `disabled_inactivity`，之後完全不再執行，且不會有任何通知）。
+
+本專案用「到期日」機制避免這件事：
+
+- `.github/heartbeat.json` 記錄 `lastRefreshedAt` 與 `intervalDays`（預設 **55** 天，刻意小於 60 留 5 天緩衝）。
+- 每次 workflow 執行時比對 `今天 >= lastRefreshedAt + intervalDays`：
+  - 未到期 → 直接跳過，**不產生任何 commit**。
+  - 已到期 → 把 `lastRefreshedAt` 改為今天、重算 `nextDueAt`，commit 並 push 回當前分支。
+- 因此每年只會產生約 7 個 `chore: refresh keepalive until ...` commit，即可讓 60 天計時器永遠不會到期。
+
+```json
+{
+  "intervalDays": 55,
+  "lastRefreshedAt": "2026-11-17",
+  "nextDueAt": "2027-01-11"
+}
+```
+
+`nextDueAt` 僅供人眼與監控查看，程式判斷一律以 `lastRefreshedAt + intervalDays` 計算，避免兩個欄位不一致。
+
+注意事項：
+
+- 需要 workflow 的 `permissions.contents: write`（已設定）。
+- 預設使用 `GITHUB_TOKEN` 推 commit；若要以「真人帳號」身分 push（或 repository 有分支保護規則），請新增 repository secret `KEEPALIVE_TOKEN`（fine-grained PAT，權限 `Contents: Read and write`），workflow 會自動優先使用它。
+- 推 commit 用的是 `$GITHUB_TOKEN`/`KEEPALIVE_TOKEN`，`GITHUB_TOKEN` 的 push 不會觸發其他 workflow，因此不會造成遞迴執行。
+- 若 workflow 已被停用，keepalive 也無法執行，需手動恢復一次：
+
+  ```bash
+  gh workflow enable update-train-data.yml
+  ```
 
 ### Secrets 設定
 
