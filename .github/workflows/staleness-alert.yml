@@ -28,12 +28,19 @@ jobs:
       # 每日 05:00 (Asia/Taipei) 更新一次，27 小時 = 24 小時 + 3 小時排程／部署緩衝。
       MAX_AGE_HOURS: "27"
       ALERT_LABEL: "data-staleness"
+      # 選填：用 repository variable 覆寫 latest.json 網址（gh variable set LATEST_URL）。
+      # 未設定時為空字串，scripts/check-staleness.sh 會忽略它並自行推導
+      # （gh api pages → CNAME → <owner>.github.io/<repo>）。
+      LATEST_URL: ${{ vars.LATEST_URL }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Check published data staleness
         id: check
+        # GH_TOKEN 讓腳本可以用 `gh api .../pages` 取得真實站台網址（自訂網域）。
+        env:
+          GH_TOKEN: ${{ github.token }}
         # 這一步刻意不讓 workflow 失敗：先確保告警 issue 一定會被建立／更新，
         # 再由最後的「Fail when data is stale」步驟決定 workflow 成敗。
         run: |
