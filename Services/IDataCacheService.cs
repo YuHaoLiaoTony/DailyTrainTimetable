@@ -7,5 +7,6 @@ public interface IDataCacheService
     Task<CacheResult> EvaluateAsync(
         string outputDir,
         IReadOnlyList<DateOnly> requestedDates,
+        CacheEvaluationOptions? options = null,
         CancellationToken ct = default);
 }

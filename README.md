@@ -72,6 +72,9 @@ dotnet run -- --days 14
 
 產生今天起 14 天的資料。
 
+快取有效性以 `output/data/latest.json` 的 `dataVersion` 為準；版本不符或無版本資訊時會自動重抓該批日期。
+強制更新：`dotnet run -- --force`（本次全部日期）或 `dotnet run -- --refresh-dates 2026-11-17,2026-11-18`（指定日期，超出 `--days` 範圍會被忽略）。
+
 ---
 
 ## 輸出檔案
@@ -144,15 +147,15 @@ output/data/
 
 | 觸發方式 | 說明 |
 |---|---|
-| 排程（cron） | 每日 UTC 21:00（臺灣時間 05:00）自動執行 |
-| 手動觸發 | 透過 GitHub Actions 頁面的 `workflow_dispatch` 按鈕 |
+| 排程（cron） | 每日 UTC 21:00（臺灣時間 05:00）自動執行，固定 `--days 31` |
+| 手動觸發 | 透過 GitHub Actions 頁面的 `workflow_dispatch` 按鈕，可填 `days` 輸入（預設 `31`，字串）覆寫天數 |
 
 ### 執行步驟
 
 1. 簽出程式碼
 2. 檢查並視需要更新 `.github/heartbeat.json`（見下方「防止排程被自動停用」）
 3. 安裝 .NET 8 SDK
-4. 以 `--days` 參數執行應用程式（預設 1 天）
+4. 以 `--days` 參數執行應用程式（排程固定 31 天；手動觸發時由 `days` 輸入決定）
 5. 設定 GitHub Pages
 6. 上傳 `output/` 目錄為 Pages artifact
 7. 部署至 GitHub Pages
@@ -189,6 +192,29 @@ GitHub 會在 **repository 連續 60 天沒有 push 活動**後，自動停用 `
   ```bash
   gh workflow enable update-train-data.yml
   ```
+
+### Keepalive 備援（`keepalive.yml`）
+
+上面的 keepalive 步驟住在 `update-train-data.yml` 內，一旦該 workflow 被 GitHub 停用，keepalive 也會跟著停（雞生蛋）。`.github/workflows/keepalive.yml` 是同一套「到期才 refresh」邏輯的獨立備援：
+
+- 自己的 `schedule`（每日 UTC 20:30／臺灣時間 04:30）＋ `workflow_dispatch`，權限只需 `contents: write`。
+- 判斷機制與主 workflow 完全相同（以 `.github/heartbeat.json` 的 `lastRefreshedAt + intervalDays` 算到期日），**未到期就是 no-op**，兩邊同時跑也安全、可重複執行。
+- 主 workflow 被停用時，這裡仍會 push，讓 60 天計時器重新計時。
+
+### 資料過期告警（staleness alert）
+
+`update-train-data.yml` 失敗時只會在 Actions 頁面留下紅燈，資料會靜靜停在舊日期。`staleness-alert.yml` 每小時檢查已發布的 `latest.json`，`updatedAt` 超過 **27 小時**（24 小時排程 + 3 小時緩衝）即：
+
+- 讓 workflow 失敗，GitHub 會通知最近修改該 workflow 的人。
+- 用 `gh` 建立或更新 label 為 `data-staleness` 的 issue（已有開啟中的同 label issue 就留言、每天最多一則，避免重複開單與洗版），資料恢復正常後自動關閉。
+
+閾值由 `staleness-alert.yml` 的 `MAX_AGE_HOURS` 控制，腳本本體為 `scripts/check-staleness.sh`（本機可跑 `MAX_AGE_HOURS=48 scripts/check-staleness.sh`，它會改讀 `output/data/latest.json`）。要關閉此告警：`gh workflow disable staleness-alert.yml`。
+
+### 執行失敗回報（`workflow-failure` issue）
+
+`update-train-data.yml` 內建 `if: failure()` 的回報步驟，任何一步失敗（`dotnet test`、TDX 抓取、Pages 部署）都會用 `gh` 在 label 為 `workflow-failure` 的 issue 留言（已存在開啟中的同 label issue 就留言、否則開新單，同一 run 不重複留言）；成功時自動關閉該 issue。回報步驟是 `continue-on-error`，即使它自己失敗也不會蓋掉原始錯誤。
+
+> 資料集不保證連續：程式只從執行當下的台北日期往後產生 N 天，過去缺口不會自動補回。
 
 ### Secrets 設定
 

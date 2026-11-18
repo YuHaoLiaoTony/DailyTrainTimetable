@@ -1,0 +1,84 @@
+name: Keepalive
+
+# 目的：GitHub 會在 repository 連續 60 天沒有 push 後自動停用 `schedule` 觸發的 workflow
+# （`disabled_inactivity`，而且不會有任何通知）。原本唯一會 push 的
+# `Refresh keepalive commit` 步驟住在 update-train-data.yml 裡，一旦該 workflow 被停用，
+# keepalive 也跟著停，形成雞生蛋，無法自癒。
+#
+# 這個 workflow 是那份邏輯的獨立備援：自己的 schedule、自己的 push。
+# 主 workflow 與本 workflow 都保留同樣的「到期才 push」判斷，因此：
+#   - 兩邊同時跑不會互相衝突（未到期就是 no-op，重複執行安全）。
+#   - 主 workflow 被停用時，這裡仍會 push，讓 60 天計時器重新計時。
+#
+# 需要 contents: write（推 commit）；不需要任何 secret（KEEPALIVE_TOKEN 可選）。
+
+on:
+  schedule:
+    # 每天 UTC 20:30（Asia/Taipei 04:30），在主 workflow 之前先檢查一次。
+    - cron: "30 20 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: keepalive
+  cancel-in-progress: false
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # 與主 workflow 一致：有 KEEPALIVE_TOKEN 就用它（真人 push），否則用 GITHUB_TOKEN。
+          token: ${{ secrets.KEEPALIVE_TOKEN || github.token }}
+
+      - name: Refresh keepalive commit
+        env:
+          HEARTBEAT_FILE: .github/heartbeat.json
+          DEFAULT_INTERVAL_DAYS: "55"
+        run: |
+          set -euo pipefail
+          file="$HEARTBEAT_FILE"
+          today="$(date -u +%F)"
+          interval="$DEFAULT_INTERVAL_DAYS"
+          last=""
+
+          if [ -f "$file" ]; then
+            last="$(sed -n 's/.*"lastRefreshedAt"[[:space:]]*:[[:space:]]*"\([0-9]\{4\}-[0-9][0-9]-[0-9][0-9]\)".*/\1/p' "$file" | head -n 1)"
+            file_interval="$(sed -n 's/.*"intervalDays"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$file" | head -n 1)"
+            if [ -n "${file_interval:-}" ]; then
+              interval="$file_interval"
+            fi
+          fi
+
+          if [ -n "$last" ]; then
+            due="$(date -u -d "$last + $interval days" +%F)"
+            if [ "$(date -u -d "$today" +%s)" -lt "$(date -u -d "$due" +%s)" ]; then
+              echo "keepalive 尚有效：last=$last interval=${interval}d nextDue=$due（今日 $today），跳過。"
+              exit 0
+            fi
+          fi
+
+          next="$(date -u -d "$today + $interval days" +%F)"
+          mkdir -p "$(dirname "$file")"
+          printf '{\n  "intervalDays": %s,\n  "lastRefreshedAt": "%s",\n  "nextDueAt": "%s"\n}\n' \
+            "$interval" "$today" "$next" > "$file.tmp"
+          mv "$file.tmp" "$file"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$file"
+
+          if git diff --cached --quiet; then
+            echo "keepalive 內容無變更，跳過 commit。"
+            exit 0
+          fi
+
+          git commit -m "chore: refresh keepalive until $next"
+          branch="${GITHUB_REF_NAME:-$(git rev-parse --abbrev-ref HEAD)}"
+          git push origin "HEAD:${branch}" \
+            || { git pull --rebase --autostash && git push origin "HEAD:${branch}"; }
+          echo "keepalive 已更新：last=$today nextDue=$next"

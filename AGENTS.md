@@ -51,8 +51,8 @@ The app:
 - If changing the generated JSON schema, update `Program.cs`, README schema examples, app SQLite notes, and `DataVersion` as needed.
 - If changing date range behavior, update `ParseDays`, README local run notes, and GitHub Actions arguments as needed.
 - If changing TDX request behavior, keep retry/rate-limit handling in mind, especially HTTP 429 and `Retry-After`.
-- If changing GitHub Actions behavior, update `.github/workflows/update-train-data.yml` and README schedule/Pages notes together.
-- Never remove the `Refresh keepalive commit` step or `.github/heartbeat.json`: GitHub auto-disables `schedule` workflows after 60 days without repository push activity (`disabled_inactivity`). The step pushes a refreshed `lastRefreshedAt` every `intervalDays` (55) days and is a no-op otherwise. Keep `intervalDays < 60`.
+- If changing GitHub Actions behavior, update `.github/workflows/update-train-data.yml`, `.github/workflows/keepalive.yml`, `.github/workflows/staleness-alert.yml`, and README schedule/Pages notes together.
+- Never remove the `Refresh keepalive commit` step or `.github/heartbeat.json`: GitHub auto-disables `schedule` workflows after 60 days without repository push activity (`disabled_inactivity`). The step pushes a refreshed `lastRefreshedAt` every `intervalDays` (55) days and is a no-op otherwise. Keep `intervalDays < 60`. `.github/workflows/keepalive.yml` duplicates this logic as a backup so a disabled main workflow can still self-heal; keep both.
 
 ## Generated files
 
@@ -99,21 +99,27 @@ The GitHub Actions workflow currently runs:
 dotnet run --configuration Release --project DailyTrainTimetable.csproj -- --days 31
 ```
 
+Schedule runs always use `--days 31`; `workflow_dispatch` overrides it through the `days` input (default `"31"`).
+
 ## GitHub Actions
 
-The workflow file is:
+The workflow files are:
 
 ```text
-.github/workflows/update-train-data.yml
+.github/workflows/update-train-data.yml   # fetch + test + Pages deploy + failure reporting
+.github/workflows/keepalive.yml           # backup heartbeat refresh (self-heals a disabled main workflow)
+.github/workflows/staleness-alert.yml     # hourly published-data staleness alert (data-staleness issue)
 ```
 
-The workflow:
+The main workflow:
 
-- Supports `workflow_dispatch` for manual runs.
-- Supports `schedule` for cron runs.
+- Takes `--days 31` on schedule; `workflow_dispatch` accepts an optional `days` string input (default `"31"`).
 - Uses `TDX_CLIENT_ID` and `TDX_CLIENT_SECRET` repository secrets.
 - Builds/runs the .NET app and uploads `output` as a GitHub Pages artifact.
 - Requires GitHub Pages source to be set to `GitHub Actions`.
+- On any step failure it opens/updates an issue labelled `workflow-failure` (`permissions: issues: write`) and closes it after a successful run.
+
+The keepalive backup and the main `Refresh keepalive commit` step share the same `lastRefreshedAt + intervalDays` check, so both are no-op-safe and can run on the same day.
 
 GitHub Actions cron expressions are UTC. Scheduled workflows only run on the GitHub default branch and may be delayed or skipped by GitHub under load. If a scheduled workflow stops firing, modifying the cron expression can help GitHub re-register the schedule.
 

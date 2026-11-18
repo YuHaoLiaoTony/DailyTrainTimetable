@@ -1,0 +1,141 @@
+name: Data staleness alert
+
+# 目的：偵測「workflow 連續失敗、GitHub Pages 上的資料停在舊日期」這件事。
+# update-train-data.yml 只負責產生資料與 keepalive，成功與否只有當天看 Actions 頁面才知道；
+# 這個 workflow 每小時檢查一次已發布的 latest.json，資料過期就讓 workflow 失敗，
+# 並用 gh CLI 自動建立／更新一個 data-staleness issue，讓問題留下可追蹤的紀錄。
+#
+# 不需要任何額外的外部服務或 secret：只用 GITHUB_TOKEN（issues: write）。
+
+on:
+  schedule:
+    # 每小時的 15 分（UTC）檢查一次，避開整點排程尖峰。GitHub cron 只接受 UTC。
+    - cron: "15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: staleness-alert
+  cancel-in-progress: false
+
+jobs:
+  check-staleness:
+    runs-on: ubuntu-latest
+    env:
+      # 每日 05:00 (Asia/Taipei) 更新一次，27 小時 = 24 小時 + 3 小時排程／部署緩衝。
+      MAX_AGE_HOURS: "27"
+      ALERT_LABEL: "data-staleness"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check published data staleness
+        id: check
+        # 這一步刻意不讓 workflow 失敗：先確保告警 issue 一定會被建立／更新，
+        # 再由最後的「Fail when data is stale」步驟決定 workflow 成敗。
+        run: |
+          set -uo pipefail
+          set +e
+          scripts/check-staleness.sh
+          code=$?
+          set -e
+          echo "check-staleness.sh exit code: $code"
+          echo "exit_code=$code" >>"$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Open or update staleness issue
+        if: steps.check.outputs.status != 'fresh'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          LABEL: ${{ env.ALERT_LABEL }}
+          STATUS: ${{ steps.check.outputs.status }}
+          DETAIL: ${{ steps.check.outputs.detail }}
+          UPDATED_AT: ${{ steps.check.outputs.updated_at }}
+          LATEST_DATE: ${{ steps.check.outputs.latest_date }}
+          HOURS_BEHIND: ${{ steps.check.outputs.hours_behind }}
+          SOURCE: ${{ steps.check.outputs.source }}
+          THRESHOLD_HOURS: ${{ env.MAX_AGE_HOURS }}
+        run: |
+          set -euo pipefail
+
+          run_url="${GITHUB_SERVER_URL}/${GH_REPO}/actions/runs/${GITHUB_RUN_ID}"
+          # 每天最多在同一張 issue 留一則留言，避免每小時檢查洗版。
+          today="$(TZ=Asia/Taipei date +%F)"
+          marker="<!-- staleness-alert:${today} -->"
+
+          title="資料過期：GitHub Pages 上的時刻表資料未更新"
+          # 用 printf 逐行組 body，避免 heredoc 在 YAML run 區塊裡的縮排問題。
+          body="$(printf '%s\n' \
+            '### 資料過期告警' \
+            '' \
+            "- 判定狀態：\`${STATUS}\`" \
+            "- 資料最後更新（\`updatedAt\`）：\`${UPDATED_AT:-unknown}\`" \
+            "- 最新資料日期（\`availableDates\` 最大值）：\`${LATEST_DATE:-unknown}\`" \
+            "- 已落後：\`${HOURS_BEHIND:-unknown}\` 小時（門檻 ${THRESHOLD_HOURS} 小時）" \
+            "- 取值來源：\`${SOURCE:-unknown}\`（pages = GitHub Pages，local = repo 內 fallback）" \
+            "- 說明：${DETAIL}" \
+            "- 執行紀錄：${run_url}" \
+            '' \
+            '排查方向：`gh run list --workflow update-train-data.yml` 檢查排程是否失敗或被停用（`gh workflow enable update-train-data.yml`）、TDX 憑證／額度是否失效、Pages 部署是否成功。' \
+            '' \
+            "${marker}")"
+
+          # label 不存在時自動建立；--force 讓已存在時只更新描述，不報錯。
+          gh label create "$LABEL" --force \
+            --color "B60205" \
+            --description "Published train data is stale (automated alert)" >/dev/null
+
+          number="$(gh issue list \
+            --label "$LABEL" \
+            --state open \
+            --limit 1 \
+            --json number \
+            --jq '.[0].number // empty')"
+
+          if [ -n "$number" ]; then
+            if gh issue view "$number" --json comments --jq '.comments[].body' | grep -qF "$marker"; then
+              echo "issue #$number 今天已留言過（${today}），跳過重複留言。"
+            else
+              gh issue comment "$number" --body "$body"
+              echo "已更新既有 issue #$number。"
+            fi
+          else
+            gh issue create --title "$title" --label "$LABEL" --body "$body"
+          fi
+
+      - name: Close staleness issue after recovery
+        if: steps.check.outputs.status == 'fresh'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          LABEL: ${{ env.ALERT_LABEL }}
+          UPDATED_AT: ${{ steps.check.outputs.updated_at }}
+          HOURS_BEHIND: ${{ steps.check.outputs.hours_behind }}
+        run: |
+          set -euo pipefail
+
+          number="$(gh issue list \
+            --label "$LABEL" \
+            --state open \
+            --limit 1 \
+            --json number \
+            --jq '.[0].number // empty')"
+
+          if [ -z "$number" ]; then
+            echo "沒有開啟中的 $LABEL issue，無需處理。"
+            exit 0
+          fi
+
+          gh issue comment "$number" --body "資料已恢復正常：\`updatedAt\`=${UPDATED_AT}（落後 ${HOURS_BEHIND} 小時），自動關閉。"
+          gh issue close "$number" --reason completed
+          echo "已關閉 issue #$number。"
+
+      - name: Fail when data is stale
+        if: steps.check.outputs.status != 'fresh'
+        run: |
+          echo "::error::已發布的時刻表資料過期或無法判定新鮮度（status=${{ steps.check.outputs.status }}，門檻 ${{ env.MAX_AGE_HOURS }} 小時）。詳見 data-staleness issue。"
+          exit 1

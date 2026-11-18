@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Net;
 using System.Net.Http.Headers;
 using System.Text.Json;
 using DailyTrainTimetable.Models;
@@ -24,9 +25,7 @@ public sealed class TdxApiService : ITdxApiService
         IDictionary<string, Station> stationMap,
         CancellationToken ct = default)
     {
-        var token = await _authService.GetAccessTokenAsync(ct);
-
-        using var response = await SendWithRetryAsync(trainDate, token, ct);
+        using var response = await SendWithAuthRetryAsync(trainDate, ct);
         var responseText = await response.Content.ReadAsStringAsync(ct);
 
         using var document = JsonDocument.Parse(responseText);
@@ -61,6 +60,37 @@ public sealed class TdxApiService : ITdxApiService
             TrainTimetables: trainTimetables);
     }
 
+    /// <summary>
+    /// 送出請求；若 TDX 回 401（token 失效），作廢目前 token、強制重取一次後重試一次。
+    /// 重取後仍為 401 才視為失敗，避免無限制重試放大請求量。
+    /// </summary>
+    private async Task<HttpResponseMessage> SendWithAuthRetryAsync(DateOnly trainDate, CancellationToken ct)
+    {
+        var token = await _authService.GetAccessTokenAsync(ct);
+        var response = await SendWithRetryAsync(trainDate, token, ct);
+        if (response.StatusCode != HttpStatusCode.Unauthorized)
+        {
+            return response;
+        }
+
+        response.Dispose();
+        Console.Error.WriteLine(
+            $"TDX returned 401 Unauthorized for {trainDate:yyyy-MM-dd}. Refreshing access token and retrying once.");
+        await _authService.InvalidateTokenAsync(token, ct);
+
+        var refreshedToken = await _authService.GetAccessTokenAsync(ct);
+        var retryResponse = await SendWithRetryAsync(trainDate, refreshedToken, ct);
+        if (retryResponse.StatusCode != HttpStatusCode.Unauthorized)
+        {
+            return retryResponse;
+        }
+
+        var errorBody = await retryResponse.Content.ReadAsStringAsync(ct);
+        retryResponse.Dispose();
+        throw new HttpRequestException(
+            $"TDX API returned HTTP 401 Unauthorized after refreshing the access token. Response: {errorBody}");
+    }
+
     private async Task<HttpResponseMessage> SendWithRetryAsync(DateOnly trainDate, string token, CancellationToken ct)
     {
         var retryDelays = new[]
@@ -83,6 +113,12 @@ public sealed class TdxApiService : ITdxApiService
             }
 
             Console.Error.WriteLine($"TDX request failed for {trainDate:yyyy-MM-dd}: HTTP {(int)response.StatusCode} {response.StatusCode}");
+
+            if (response.StatusCode == HttpStatusCode.Unauthorized)
+            {
+                // 401 由 SendWithAuthRetryAsync 決定是否重取 token 後重試，這裡不視為一般錯誤。
+                return response;
+            }
 
             if ((int)response.StatusCode != 429 || attempt >= retryDelays.Length)
             {

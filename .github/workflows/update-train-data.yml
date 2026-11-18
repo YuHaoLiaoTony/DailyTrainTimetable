@@ -7,20 +7,16 @@ on:
   workflow_dispatch:
     inputs:
       days:
-        description: Number of days to generate
+        description: Number of days to generate (from today, Asia/Taipei)
         required: false
-        default: "1"
-        type: choice
-        options:
-          - "1"
-          - "7"
-          - "14"
-          - "31"
+        default: "31"
+        type: string
 
 permissions:
   contents: write # 需要 write 才能推 keepalive commit
   pages: write
   id-token: write
+  issues: write # 失敗回報需要建立／更新 workflow-failure issue
 
 concurrency:
   group: pages
@@ -56,7 +52,7 @@ jobs:
           last=""
 
           if [ -f "$file" ]; then
-            last="$(sed -n 's/.*"lastRefreshedAt"[[:space:]]*:[[:space:]]*"\([0-9][0-9-]\{8\}\)".*/\1/p' "$file" | head -n 1)"
+            last="$(sed -n 's/.*"lastRefreshedAt"[[:space:]]*:[[:space:]]*"\([0-9]\{4\}-[0-9][0-9]-[0-9][0-9]\)".*/\1/p' "$file" | head -n 1)"
             file_interval="$(sed -n 's/.*"intervalDays"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$file" | head -n 1)"
             if [ -n "${file_interval:-}" ]; then
               interval="$file_interval"
@@ -112,7 +108,7 @@ jobs:
           TDX_CLIENT_ID: ${{ secrets.TDX_CLIENT_ID }}
           TDX_CLIENT_SECRET: ${{ secrets.TDX_CLIENT_SECRET }}
           PAGES_BASE_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}
-        run: dotnet run --configuration Release --project DailyTrainTimetable.csproj -- --days ${{ inputs.days || '1' }}
+        run: dotnet run --configuration Release --project DailyTrainTimetable.csproj -- --days ${{ inputs.days || '31' }}
 
       - name: Setup Pages
         uses: actions/configure-pages@v5
@@ -125,3 +121,74 @@ jobs:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
+
+      # 測試／TDX 抓取／Pages 部署任一失敗都會走到這裡，留下可追蹤的 issue。
+      # continue-on-error 讓回報步驟自身失敗時不會蓋掉原始錯誤（job 仍維持 failed）。
+      - name: Report workflow failure
+        if: failure()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          LABEL: workflow-failure
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -uo pipefail
+
+          marker="<!-- workflow-failure:${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT} -->"
+          title="Update train data workflow 失敗（資料可能已停止更新）"
+          body="$(printf '%s\n' \
+            '### Update train data workflow 失敗' \
+            '' \
+            "- 執行紀錄：${RUN_URL}" \
+            "- 觸發方式：\`${EVENT_NAME}\`" \
+            "- 分支：\`${REF_NAME}\`" \
+            "- 失敗時間（UTC）：\`$(date -u +%FT%TZ)\`" \
+            '' \
+            '排查方向：先看該 run 的第一個紅燈步驟。TDX 429／額度問題請看回應內容；`dotnet test` 失敗請在本機重跑；Pages 部署失敗通常是 Pages 來源設定或環境保護規則。' \
+            '' \
+            "${marker}")"
+
+          # label 不存在時自動建立；--force 讓已存在時只更新描述。
+          gh label create "$LABEL" --force \
+            --color "D93F0B" \
+            --description "Update train data workflow is failing (automated)" >/dev/null
+
+          number="$(gh issue list \
+            --label "$LABEL" \
+            --state open \
+            --limit 1 \
+            --json number \
+            --jq '.[0].number // empty')"
+
+          if [ -n "$number" ]; then
+            if gh issue view "$number" --json comments --jq '.comments[].body' | grep -qF "$marker"; then
+              echo "issue #$number 本次執行已回報過，略過重複留言。"
+            else
+              gh issue comment "$number" --body "$body"
+              echo "已更新既有 issue #$number。"
+            fi
+          else
+            gh issue create --title "$title" --label "$LABEL" --body "$body"
+          fi
+
+      # 成功時關閉殘留的失敗 issue，避免同一張單一直掛著。
+      - name: Close workflow-failure issue after success
+        if: success()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          LABEL: workflow-failure
+        run: |
+          set -uo pipefail
+          number="$(gh issue list --label "$LABEL" --state open --limit 1 --json number --jq '.[0].number // empty')"
+          if [ -z "$number" ]; then
+            echo "沒有開啟中的 $LABEL issue。"
+            exit 0
+          fi
+          gh issue comment "$number" --body "本次執行成功（${GITHUB_SERVER_URL}/${GH_REPO}/actions/runs/${GITHUB_RUN_ID}），自動關閉。"
+          gh issue close "$number" --reason completed
+          echo "已關閉 issue #$number。"

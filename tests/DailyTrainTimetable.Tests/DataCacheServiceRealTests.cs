@@ -6,8 +6,20 @@ using Xunit;
 
 namespace DailyTrainTimetable.Tests;
 
+/// <summary>
+/// DataCacheService 的行為測試（真實檔案系統 + fake HttpClient，不打外部 API）。
+/// 版本比對規則：日期檔本身沒有版本欄位，因此以資料集索引 latest.json（本地優先、其次 Pages）
+/// 的 dataVersion 作為整批日期檔的版本權威；版本不符或完全沒有版本資訊 → 視為過期重抓。
+/// </summary>
 public sealed class DataCacheServiceRealTests : IDisposable
 {
+    private const string Version = "1";
+
+    private static readonly JsonSerializerOptions JsonOptions = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+    };
+
     private readonly string _tempDir;
 
     public DataCacheServiceRealTests()
@@ -25,16 +37,17 @@ public sealed class DataCacheServiceRealTests : IDisposable
     }
 
     [Fact]
-    public async Task EvaluateAsync_should_skip_when_all_files_exist_and_no_pages_uri()
+    public async Task EvaluateAsync_should_skip_when_version_matches_and_no_pages_uri()
     {
-        File.WriteAllText(System.IO.Path.Combine(_tempDir, "20260601.json"), "{}");
-        File.WriteAllText(System.IO.Path.Combine(_tempDir, "20260602.json"), "{}");
+        SeedDateFile("20260601");
+        SeedDateFile("20260602");
+        await SeedLatestAsync(Version);
 
         using var httpClient = new HttpClient();
         var service = new DataCacheService(httpClient, pagesLatestUri: null);
 
         var dates = new List<DateOnly> { new(2026, 6, 1), new(2026, 6, 2) };
-        var result = await service.EvaluateAsync(_tempDir, dates);
+        var result = await service.EvaluateAsync(_tempDir, dates, new CacheEvaluationOptions(Version));
 
         Assert.Equal(2, result.SkipDates.Count);
         Assert.Empty(result.FetchDates);
@@ -42,44 +55,128 @@ public sealed class DataCacheServiceRealTests : IDisposable
     }
 
     [Fact]
+    public async Task EvaluateAsync_should_refetch_when_no_version_info_available()
+    {
+        SeedDateFile("20260601");
+
+        using var httpClient = new HttpClient();
+        var service = new DataCacheService(httpClient, pagesLatestUri: null);
+
+        var dates = new List<DateOnly> { new(2026, 6, 1) };
+        var result = await service.EvaluateAsync(_tempDir, dates, new CacheEvaluationOptions(Version));
+
+        // 沒有任何版本資訊可用（缺 latest.json、無 Pages）→ 版本無法確認，視為過期。
+        Assert.Empty(result.SkipDates);
+        Assert.Empty(result.FetchDates);
+        Assert.Contains(new DateOnly(2026, 6, 1), result.ForceFetchDates);
+    }
+
+    [Fact]
+    public async Task EvaluateAsync_should_force_refetch_when_local_version_differs()
+    {
+        SeedDateFile("20260601");
+        SeedDateFile("20260602");
+        await SeedLatestAsync("0");
+
+        using var httpClient = new HttpClient();
+        var service = new DataCacheService(httpClient, pagesLatestUri: null);
+
+        var dates = new List<DateOnly> { new(2026, 6, 1), new(2026, 6, 2) };
+        var result = await service.EvaluateAsync(_tempDir, dates, new CacheEvaluationOptions(Version));
+
+        Assert.Empty(result.SkipDates);
+        Assert.Empty(result.FetchDates);
+        Assert.Equal(2, result.ForceFetchDates.Count);
+        Assert.Contains(new DateOnly(2026, 6, 1), result.ForceFetchDates);
+        Assert.Contains(new DateOnly(2026, 6, 2), result.ForceFetchDates);
+    }
+
+    [Fact]
+    public async Task EvaluateAsync_should_refetch_when_latest_json_lacks_version()
+    {
+        SeedDateFile("20260601");
+        await File.WriteAllTextAsync(
+            System.IO.Path.Combine(_tempDir, "latest.json"),
+            "{\"updatedAt\":\"2026-06-01T09:00:00+08:00\",\"availableDates\":[\"2026-06-01\"]}");
+
+        using var httpClient = new HttpClient();
+        var service = new DataCacheService(httpClient, pagesLatestUri: null);
+
+        var dates = new List<DateOnly> { new(2026, 6, 1) };
+        var result = await service.EvaluateAsync(_tempDir, dates, new CacheEvaluationOptions(Version));
+
+        Assert.Empty(result.SkipDates);
+        Assert.Contains(new DateOnly(2026, 6, 1), result.ForceFetchDates);
+    }
+
+    [Fact]
+    public async Task EvaluateAsync_should_force_refetch_dates_requested_by_cli()
+    {
+        SeedDateFile("20260601");
+        SeedDateFile("20260602");
+        await SeedLatestAsync(Version);
+
+        using var httpClient = new HttpClient();
+        var service = new DataCacheService(httpClient, pagesLatestUri: null);
+
+        var dates = new List<DateOnly> { new(2026, 6, 1), new(2026, 6, 2) };
+        var forced = new HashSet<DateOnly> { new(2026, 6, 1) };
+        var result = await service.EvaluateAsync(
+            _tempDir, dates, new CacheEvaluationOptions(Version, forced));
+
+        Assert.Contains(new DateOnly(2026, 6, 1), result.ForceFetchDates);
+        Assert.DoesNotContain(new DateOnly(2026, 6, 1), result.SkipDates);
+        Assert.Contains(new DateOnly(2026, 6, 2), result.SkipDates);
+        Assert.Single(result.SkipDates);
+    }
+
+    [Fact]
+    public async Task EvaluateAsync_should_force_refetch_forced_dates_even_without_file()
+    {
+        await SeedLatestAsync(Version);
+
+        using var httpClient = new HttpClient();
+        var service = new DataCacheService(httpClient, pagesLatestUri: null);
+
+        var dates = new List<DateOnly> { new(2026, 6, 1) };
+        var forced = new HashSet<DateOnly> { new(2026, 6, 1) };
+        var result = await service.EvaluateAsync(
+            _tempDir, dates, new CacheEvaluationOptions(Version, forced));
+
+        Assert.Contains(new DateOnly(2026, 6, 1), result.ForceFetchDates);
+        Assert.Empty(result.FetchDates);
+    }
+
+    [Fact]
     public async Task EvaluateAsync_should_fetch_when_files_missing()
     {
-        File.WriteAllText(System.IO.Path.Combine(_tempDir, "20260601.json"), "{}");
+        SeedDateFile("20260601");
+        await SeedLatestAsync(Version);
 
         using var httpClient = new HttpClient();
         var service = new DataCacheService(httpClient, pagesLatestUri: null);
 
         var dates = new List<DateOnly> { new(2026, 6, 1), new(2026, 6, 2), new(2026, 6, 3) };
-        var result = await service.EvaluateAsync(_tempDir, dates);
+        var result = await service.EvaluateAsync(_tempDir, dates, new CacheEvaluationOptions(Version));
 
         Assert.Single(result.SkipDates);
         Assert.Equal(2, result.FetchDates.Count);
         Assert.Contains(new DateOnly(2026, 6, 2), result.FetchDates);
         Assert.Contains(new DateOnly(2026, 6, 3), result.FetchDates);
+        Assert.Empty(result.ForceFetchDates);
     }
 
     [Fact]
     public async Task EvaluateAsync_should_fetch_when_file_exists_but_not_in_pages()
     {
-        File.WriteAllText(System.IO.Path.Combine(_tempDir, "20260601.json"), "{}");
+        SeedDateFile("20260601");
 
-        var jsonOptions = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
-        var pagesJson = JsonSerializer.Serialize(new LatestData(
-            UpdatedAt: DateTimeOffset.Now,
-            AvailableDates: new List<string> { "2026-06-02" },
-            DataVersion: "1"), jsonOptions);
-
-        var handler = new FakeHttpMessageHandler(_ =>
-            new HttpResponseMessage(HttpStatusCode.OK)
-            {
-                Content = new StringContent(pagesJson, System.Text.Encoding.UTF8, "application/json")
-            });
-
-        using var httpClient = new HttpClient(handler);
-        var service = new DataCacheService(httpClient, new Uri("https://example.com/data/latest.json"));
+        using var httpClient = new HttpClient(CreatePagesHandler(new LatestData(
+            DateTimeOffset.Now, new List<string> { "2026-06-02" }, Version)));
+        var service = new DataCacheService(httpClient, PagesUri);
 
         var dates = new List<DateOnly> { new(2026, 6, 1) };
-        var result = await service.EvaluateAsync(_tempDir, dates);
+        var result = await service.EvaluateAsync(_tempDir, dates, new CacheEvaluationOptions(Version));
 
         Assert.Empty(result.SkipDates);
         Assert.Single(result.FetchDates);
@@ -89,46 +186,52 @@ public sealed class DataCacheServiceRealTests : IDisposable
     [Fact]
     public async Task EvaluateAsync_should_skip_when_file_exists_and_in_pages()
     {
-        File.WriteAllText(System.IO.Path.Combine(_tempDir, "20260601.json"), "{}");
+        SeedDateFile("20260601");
 
-        var jsonOptions = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
-        var pagesJson = JsonSerializer.Serialize(new LatestData(
-            UpdatedAt: DateTimeOffset.Now,
-            AvailableDates: new List<string> { "2026-06-01" },
-            DataVersion: "1"), jsonOptions);
-
-        var handler = new FakeHttpMessageHandler(_ =>
-            new HttpResponseMessage(HttpStatusCode.OK)
-            {
-                Content = new StringContent(pagesJson, System.Text.Encoding.UTF8, "application/json")
-            });
-
-        using var httpClient = new HttpClient(handler);
-        var service = new DataCacheService(httpClient, new Uri("https://example.com/data/latest.json"));
+        using var httpClient = new HttpClient(CreatePagesHandler(new LatestData(
+            DateTimeOffset.Now, new List<string> { "2026-06-01" }, Version)));
+        var service = new DataCacheService(httpClient, PagesUri);
 
         var dates = new List<DateOnly> { new(2026, 6, 1) };
-        var result = await service.EvaluateAsync(_tempDir, dates);
+        var result = await service.EvaluateAsync(_tempDir, dates, new CacheEvaluationOptions(Version));
 
         Assert.Single(result.SkipDates);
         Assert.Empty(result.FetchDates);
+        Assert.Empty(result.ForceFetchDates);
     }
 
     [Fact]
-    public async Task EvaluateAsync_should_fallback_to_file_only_when_pages_unreachable()
+    public async Task EvaluateAsync_should_force_refetch_when_pages_version_differs()
     {
-        File.WriteAllText(System.IO.Path.Combine(_tempDir, "20260601.json"), "{}");
+        SeedDateFile("20260601");
 
-        var handler = new FakeHttpMessageHandler(_ =>
-            new HttpResponseMessage(HttpStatusCode.InternalServerError));
-
-        using var httpClient = new HttpClient(handler);
-        var service = new DataCacheService(httpClient, new Uri("https://example.com/data/latest.json"));
+        using var httpClient = new HttpClient(CreatePagesHandler(new LatestData(
+            DateTimeOffset.Now, new List<string> { "2026-06-01" }, "0")));
+        var service = new DataCacheService(httpClient, PagesUri);
 
         var dates = new List<DateOnly> { new(2026, 6, 1) };
-        var result = await service.EvaluateAsync(_tempDir, dates);
+        var result = await service.EvaluateAsync(_tempDir, dates, new CacheEvaluationOptions(Version));
+
+        Assert.Empty(result.SkipDates);
+        Assert.Contains(new DateOnly(2026, 6, 1), result.ForceFetchDates);
+    }
+
+    [Fact]
+    public async Task EvaluateAsync_should_use_local_version_when_pages_unreachable()
+    {
+        SeedDateFile("20260601");
+        await SeedLatestAsync(Version);
+
+        using var httpClient = new HttpClient(new FakeHttpMessageHandler(_ =>
+            new HttpResponseMessage(HttpStatusCode.InternalServerError)));
+        var service = new DataCacheService(httpClient, PagesUri);
+
+        var dates = new List<DateOnly> { new(2026, 6, 1) };
+        var result = await service.EvaluateAsync(_tempDir, dates, new CacheEvaluationOptions(Version));
 
         Assert.Single(result.SkipDates);
         Assert.Empty(result.FetchDates);
+        Assert.Empty(result.ForceFetchDates);
     }
 
     [Fact]
@@ -137,11 +240,39 @@ public sealed class DataCacheServiceRealTests : IDisposable
         using var httpClient = new HttpClient();
         var service = new DataCacheService(httpClient, pagesLatestUri: null);
 
-        var result = await service.EvaluateAsync(_tempDir, new List<DateOnly>());
+        var result = await service.EvaluateAsync(_tempDir, new List<DateOnly>(), new CacheEvaluationOptions(Version));
 
         Assert.Empty(result.SkipDates);
         Assert.Empty(result.FetchDates);
         Assert.Empty(result.ForceFetchDates);
+    }
+
+    private static Uri PagesUri => new("https://example.com/data/latest.json");
+
+    private void SeedDateFile(string yyyyMMdd)
+        => File.WriteAllText(System.IO.Path.Combine(_tempDir, $"{yyyyMMdd}.json"), "{}");
+
+    private Task SeedLatestAsync(string dataVersion, params string[] availableDates)
+    {
+        var latest = new LatestData(
+            UpdatedAt: DateTimeOffset.Now,
+            AvailableDates: availableDates.Length == 0
+                ? new List<string>()
+                : availableDates.ToList(),
+            DataVersion: dataVersion);
+
+        return File.WriteAllTextAsync(
+            System.IO.Path.Combine(_tempDir, "latest.json"),
+            JsonSerializer.Serialize(latest, JsonOptions));
+    }
+
+    private static FakeHttpMessageHandler CreatePagesHandler(LatestData latest)
+    {
+        var json = JsonSerializer.Serialize(latest, JsonOptions);
+        return new FakeHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(json, System.Text.Encoding.UTF8, "application/json")
+        });
     }
 
     private sealed class FakeHttpMessageHandler : HttpMessageHandler

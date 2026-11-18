@@ -75,7 +75,7 @@ public sealed class ProgramIntegrationTests : IDisposable
         var today = DateOnly.FromDateTime(DateTimeOffset.Now.Date);
 
         var cacheService = Substitute.For<IDataCacheService>();
-        cacheService.EvaluateAsync(Arg.Any<string>(), Arg.Any<IReadOnlyList<DateOnly>>(), default)
+        cacheService.EvaluateAsync(Arg.Any<string>(), Arg.Any<IReadOnlyList<DateOnly>>(), Arg.Any<CacheEvaluationOptions?>())
             .Returns(new CacheResult(
                 SkipDates: new HashSet<DateOnly> { today },
                 FetchDates: new HashSet<DateOnly>(),
@@ -97,7 +97,7 @@ public sealed class ProgramIntegrationTests : IDisposable
         var today = DateOnly.FromDateTime(DateTimeOffset.Now.Date);
 
         var cacheService = Substitute.For<IDataCacheService>();
-        cacheService.EvaluateAsync(Arg.Any<string>(), Arg.Any<IReadOnlyList<DateOnly>>(), default)
+        cacheService.EvaluateAsync(Arg.Any<string>(), Arg.Any<IReadOnlyList<DateOnly>>(), Arg.Any<CacheEvaluationOptions?>())
             .Returns(new CacheResult(
                 SkipDates: new HashSet<DateOnly> { today },
                 FetchDates: new HashSet<DateOnly> { today.AddDays(1), today.AddDays(2) },
@@ -110,7 +110,10 @@ public sealed class ProgramIntegrationTests : IDisposable
             .Returns(new DailyTrainData(
                 TrainDate: "2026-06-01", Source: "TDX",
                 UpdatedAt: DateTimeOffset.Now,
-                TrainTimetables: new List<TrainTimetable>()));
+                TrainTimetables: new List<TrainTimetable>
+                {
+                    new("101", 0, "1100", "1", "自強", "1000", "臺北", "1025", "新竹", Array.Empty<StopTime>())
+                }));
 
         var authService = Substitute.For<ITdxAuthService>();
         var writerService = Substitute.For<IDataWriterService>();
@@ -131,7 +134,7 @@ public sealed class ProgramIntegrationTests : IDisposable
         var callCount = 0;
 
         var cacheService = Substitute.For<IDataCacheService>();
-        cacheService.EvaluateAsync(Arg.Any<string>(), Arg.Any<IReadOnlyList<DateOnly>>(), default)
+        cacheService.EvaluateAsync(Arg.Any<string>(), Arg.Any<IReadOnlyList<DateOnly>>(), Arg.Any<CacheEvaluationOptions?>())
             .Returns(new CacheResult(
                 SkipDates: new HashSet<DateOnly>(),
                 FetchDates: new HashSet<DateOnly> { today, tomorrow },
@@ -149,7 +152,10 @@ public sealed class ProgramIntegrationTests : IDisposable
                     return new DailyTrainData(
                         TrainDate: "2026-06-01", Source: "TDX",
                         UpdatedAt: DateTimeOffset.Now,
-                        TrainTimetables: new List<TrainTimetable>());
+                        TrainTimetables: new List<TrainTimetable>
+                        {
+                            new("101", 0, "1100", "1", "自強", "1000", "臺北", "1025", "新竹", Array.Empty<StopTime>())
+                        });
                 }
 
                 throw new HttpRequestException("API error");
